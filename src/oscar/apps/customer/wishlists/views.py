@@ -8,14 +8,15 @@ from django.utils.translation import gettext_lazy as _
 from django.views.generic import (
     CreateView, DeleteView, FormView, ListView, UpdateView, View)
 
-from oscar.core.loading import get_class, get_model
+from oscar.core.loading import get_class, get_classes, get_model
 from oscar.core.utils import redirect_to_referrer, safe_referrer
 
 WishList = get_model('wishlists', 'WishList')
 Line = get_model('wishlists', 'Line')
 Product = get_model('catalogue', 'Product')
 WishListForm = get_class('wishlists.forms', 'WishListForm')
-LineFormset = get_class('wishlists.formsets', 'LineFormset')
+LineFormset, WishListSharedEmailFormset = get_classes(
+    'wishlists.formsets', ('LineFormset', 'WishListSharedEmailFormset'))
 PageTitleMixin = get_class('customer.mixins', 'PageTitleMixin')
 
 
@@ -50,7 +51,7 @@ class WishListDetailView(PageTitleMixin, FormView):
 
     def get_wishlist_or_404(self, key, user):
         wishlist = get_object_or_404(WishList, key=key)
-        if wishlist.is_allowed_to_see(user):
+        if wishlist.is_allowed_to_edit(user):
             return wishlist
         else:
             raise Http404
@@ -109,6 +110,11 @@ class WishListCreateView(PageTitleMixin, CreateView):
     def get_context_data(self, **kwargs):
         ctx = super().get_context_data(**kwargs)
         ctx['product'] = self.product
+
+        # Invalid post response passes this to the context.
+        if "shared_emails_formset" not in kwargs:
+            ctx["shared_emails_formset"] = WishListSharedEmailFormset()
+
         return ctx
 
     def get_form_kwargs(self):
@@ -117,7 +123,11 @@ class WishListCreateView(PageTitleMixin, CreateView):
         return kwargs
 
     def form_valid(self, form):
-        wishlist = form.save()
+        """
+        The form argument is actually the wishlist instance because we already saved this in
+        the post method below. This is also why we do not call form.save() here.
+        """
+        wishlist = form
         if self.product:
             wishlist.add(self.product)
             msg = _("Your wishlist has been created and '%(name)s "
@@ -126,7 +136,30 @@ class WishListCreateView(PageTitleMixin, CreateView):
         else:
             msg = _("Your wishlist has been created")
         messages.success(self.request, msg)
-        return redirect(wishlist.get_absolute_url())
+        return redirect(form.get_absolute_url())
+
+    def post(self, request, *args, **kwargs):
+        """
+        Instead of letting the CreateView handle the post request, we handle it because we must
+        save the wishlist instance to the (possible) shared email instances.
+        """
+        form = self.get_form()
+        shared_emails_formset = WishListSharedEmailFormset(request.POST)
+
+        if form.is_valid() and shared_emails_formset.is_valid():
+            wishlist = form.save()
+
+            for form in shared_emails_formset:
+                # Prevents saving empty formsets.
+                if form.has_changed():
+                    wishlist_shared_email = form.save(commit=False)
+                    wishlist_shared_email.wishlist = wishlist
+                    wishlist_shared_email.save()
+
+            return self.form_valid(wishlist)
+
+        context = self.get_context_data(form=form, shared_emails_formset=shared_emails_formset)
+        return self.render_to_response(context)
 
 
 class WishListCreateWithProductView(View):
@@ -170,11 +203,43 @@ class WishListUpdateView(PageTitleMixin, UpdateView):
         kwargs['user'] = self.request.user
         return kwargs
 
+    def get_context_data(self, **kwargs):
+        ctx = super().get_context_data(**kwargs)
+
+        # Invalid post response passes this to the context.
+        if "shared_emails_formset" not in kwargs:
+            ctx["shared_emails_formset"] = WishListSharedEmailFormset(instance=self.object)
+
+        return ctx
+
     def get_success_url(self):
         messages.success(
             self.request, _("Your '%s' wishlist has been updated")
             % self.object.name)
         return reverse('customer:wishlists-list')
+
+    def post(self, request, *args, **kwargs):
+        """
+        Instead of letting the UpdateView handle the post request, we handle it because we must
+        save the wishlist instance to the (possible) shared email instances.
+        """
+        self.object = self.get_object()
+
+        form = self.get_form()
+        shared_emails_formset = WishListSharedEmailFormset(request.POST, instance=self.object)
+
+        if form.is_valid() and shared_emails_formset.is_valid():
+            form.save()
+
+            for form in shared_emails_formset:
+                # Prevents saving empty formsets.
+                if form.has_changed():
+                    form.save()
+
+            return redirect(self.get_success_url())
+
+        context = self.get_context_data(form=form, shared_emails_formset=shared_emails_formset)
+        return self.render_to_response(context)
 
 
 class WishListDeleteView(PageTitleMixin, DeleteView):
