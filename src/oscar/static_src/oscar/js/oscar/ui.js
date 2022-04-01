@@ -287,9 +287,9 @@ var oscar = (function(o, $) {
             },
             copyHrefToClipboard: function(el) {
                 var href = window.location.origin + $(el).attr('href');
-                navigator.clipboard.writeText(href).then(() => {
-                    console.log('Text copied to clipboard')
-                }).catch(err => {
+                navigator.clipboard.writeText(href).then(function() {
+                    console.log('Text copied to clipboard');
+                }).catch(function(err) {
                     console.log('Something went wrong', err);
                 });
             }
